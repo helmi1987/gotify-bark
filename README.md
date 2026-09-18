@@ -55,10 +55,10 @@ groups:                                 # App-Name (oder App-ID) → Gruppe
   Uptime-Kuma: Monitoring
 
 recipients:
-  - name: benj
+  - name: Device1
     device_key: <bark device key>
     min_priority: 0
-  - name: partner
+  - name: Device2
     device_key: <bark device key>
     min_priority: 5                     # darunter nichts weiterleiten
     max_level: timeSensitive            # bekommt nie einen Critical Alert
