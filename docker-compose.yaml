@@ -1,0 +1,34 @@
+services:
+  gotify:
+    image: gotify/server:latest
+    container_name: gotify
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Zurich
+    ports:
+      - "8888:80"
+    volumes:
+      - /opt/gotify/data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "20"
+
+  bark-server:
+    image: finab/bark-server
+    container_name: bark-server
+    restart: always
+    volumes:
+      - /opt/bark/data:/data
+    ports:
+      - "9888:8080"
+      
+  plugin-builder:
+    image: gotify/build:1.26.0-linux-amd64
+    container_name: gotify-builder
+    entrypoint: ["tail", "-f", "/dev/null"]
+    volumes:
+      - /opt/gotify/tmp/proj:/proj # Ordner für den Plugin-Quellcode
+      - /opt/gotify/data/plugins:/out # Zielordner (dein Gotify-Plugin-Ordner)
+    working_dir: /proj
