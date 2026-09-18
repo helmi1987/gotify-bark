@@ -17,7 +17,7 @@ import (
 func GetGotifyPluginInfo() plugin.Info {
 	return plugin.Info{
 		ModulePath:  "github.com/helmi1987/gotify-bark",
-		Version:     "0.3.0",
+		Version:     "0.3.1",
 		Author:      "Petrichor, extended by Benj Müller",
 		Website:     "https://github.com/helmi1987/gotify-bark",
 		License:     "MIT",
@@ -109,6 +109,14 @@ Jeder Eintrag ist ein Bark-Gerät mit eigenen Regeln:
 - **levels**: Eigene Schwellen (passive_max, timesensitive_from, critical_from) für diesen Empfänger.
 - **encryption_key / encryption_iv**: AES-CBC-Verschlüsselung (Key 16 oder 32 Bytes, IV 16 Bytes). Leer = unverschlüsselt.
 
+#### Nachrichtenlänge (max_payload)
+
+Apple nimmt pro Push höchstens 4096 Bytes an, inklusive Bark-Parametern und Apples eigenem Rahmen. Der Bark-Server kürzt nicht, Apple lehnt zu grosse Pushes ab und die Nachricht käme nie an.
+Das Plugin kürzt deshalb den Nachrichtentext (nur ` + "`body`" + `, nie Titel, Level oder Gruppe), bis das Bark-JSON in ` + "`max_payload`" + ` Bytes passt (Standard 3800). Bei verschlüsselten Empfängern zählt die Länge des base64-Ciphertexts, das kostet rund 1 KB Text.
+
+- **max_payload**: Budget in Bytes (Standard 3800, 0 = Standard).
+- **truncate_marker**: Text, der an gekürzte Nachrichten angehängt wird. Weglassen = Standardmarker, ` + "`\"\"`" + ` = kein Marker.
+
 #### Gruppen
 
 - **group_from_app** (Standard true): Der Name der Gotify-App wird als Bark-Gruppe verwendet.
@@ -137,6 +145,7 @@ levels:
 group_from_app: true
 groups:
   Uptime-Kuma: Monitoring
+max_payload: 3800
 recipients:
   - name: max_config_for_device         # Devicename ect.
     device_key: <bark device key>

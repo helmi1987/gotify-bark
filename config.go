@@ -52,6 +52,28 @@ type Config struct {
 	Groups map[string]string `yaml:"groups,omitempty"`
 	// Recipients is the list of Bark devices to forward to, each with its own rules.
 	Recipients []Recipient `yaml:"recipients"`
+
+	// MaxPayload is the size budget in bytes for the JSON sent to Bark (for encrypted recipients:
+	// the base64 ciphertext). Apple rejects APNs payloads above 4096 bytes including its own
+	// framing, so the default keeps a reserve. Longer message bodies are truncated. 0 = default.
+	MaxPayload int `yaml:"max_payload,omitempty"`
+	// TruncateMarker is appended to a truncated body. nil (key missing) = default marker, "" = none.
+	TruncateMarker *string `yaml:"truncate_marker,omitempty"`
+}
+
+// defaultMaxPayload leaves roughly 300 bytes of the 4096-byte APNs limit for Apple's framing
+// (aps dictionary with alert, sound, category, mutable-content, thread-id).
+const defaultMaxPayload = 3800
+
+// defaultTruncateMarker is appended to bodies that had to be shortened.
+const defaultTruncateMarker = " … [gekürzt, vollständig in Gotify]"
+
+// truncateMarker returns the configured marker or the default.
+func (c *Config) truncateMarker() string {
+	if c.TruncateMarker == nil {
+		return defaultTruncateMarker
+	}
+	return *c.TruncateMarker
 }
 
 // LevelConfig defines the priority thresholds for the Bark level mapping.
@@ -147,6 +169,7 @@ func (c *BarkForwardPlugin) DefaultConfig() any {
 		GotifyClientToken: "",
 		BarkURL:           "https://api.day.app/push",
 		ReconnectDelay:    10,
+		MaxPayload:        defaultMaxPayload,
 		Levels: LevelConfig{
 			PassiveMax:        intPtr(0),
 			TimeSensitiveFrom: intPtr(8),
@@ -179,6 +202,12 @@ func (c *BarkForwardPlugin) ValidateAndSetConfig(config any) error {
 	}
 	if newConfig.ReconnectDelay <= 0 {
 		newConfig.ReconnectDelay = 10
+	}
+	if newConfig.MaxPayload <= 0 {
+		newConfig.MaxPayload = defaultMaxPayload
+	}
+	if len(newConfig.truncateMarker()) >= newConfig.MaxPayload/2 {
+		return fmt.Errorf("config: truncate_marker is too long for max_payload %d", newConfig.MaxPayload)
 	}
 	if newConfig.GotifyHTTPURL == "" {
 		newConfig.GotifyHTTPURL = httpURLFromWS(newConfig.GotifyHost)

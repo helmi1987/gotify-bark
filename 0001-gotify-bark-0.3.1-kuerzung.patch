@@ -1,0 +1,628 @@
+From 515b92fa93f1fc0148afa32b4782ce5c0284cde3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 18 Sep 2026 15:41:25 +0200
+Subject: [PATCH] =?UTF-8?q?Nachrichten=20auf=20APNs-Limit=20k=C3=BCrzen,?=
+ =?UTF-8?q?=20Version=200.3.1?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Apple nimmt pro Push höchstens 4096 Bytes an; der Bark-Server kürzt
+nicht, sondern gibt 413 PayloadTooLarge zurück und die Nachricht geht
+verloren. Das Plugin misst deshalb vor dem Senden die Grösse des
+Bark-JSON und kürzt nur den Body (UTF-8-sicher, mit Marker), Titel,
+Level, Lautstärke und Gruppe bleiben intakt. Bei verschlüsselten
+Empfängern zählt die base64-Länge nach PKCS7-Padding.
+
+- neue Config-Werte max_payload (Standard 3800) und truncate_marker
+- Log-Eintrag bei jeder Kürzung
+- Tests inkl. exakter Ciphertext-Längenrechnung und Property-Test
+- go.mod-Modulpfad auf den Fork angeglichen
+- README: Abschnitt Nachrichtenlänge, Build-Anleitung um den
+  plugin-builder-Container aus docker-compose.yaml ergänzt
+- docker-compose: Gotify-Image auf 3.1.1 gepinnt, weil ein Update ohne
+  neu gebautes Plugin den Gotify-Start verhindert
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C17BfSHYbqPmVcotdtDrG9
+---
+ README.md           |  61 ++++++++++--
+ config.go           |  29 ++++++
+ docker-compose.yaml |   4 +-
+ forward.go          |   5 +
+ go.mod              |   2 +-
+ payload.go          | 108 +++++++++++++++++++++
+ payload_test.go     | 227 ++++++++++++++++++++++++++++++++++++++++++++
+ plugin.go           |  11 ++-
+ 8 files changed, 438 insertions(+), 9 deletions(-)
+ create mode 100644 payload.go
+ create mode 100644 payload_test.go
+
+diff --git a/README.md b/README.md
+index 82a6438..c7f3a94 100644
+--- a/README.md
++++ b/README.md
+@@ -8,6 +8,7 @@ Fork von [p3ddd/gotify-bark](https://github.com/p3ddd/gotify-bark), erweitert um
+ - **Mehrere Empfänger** pro Gotify-Benutzer, jeder mit eigenem Device Key, Mindestpriorität, Level-Deckel, App-Filter, Zusatzparametern und optionaler Verschlüsselung.
+ - **Gruppen**: Standardmässig der Name der Gotify-App, pro App oder pro Empfänger überschreibbar.
+ - Alles weiterhin pro Nachricht über das Extra `bark::params` übersteuerbar.
++- **Längenbegrenzung**: Lange Nachrichten werden so gekürzt, dass Apple sie annimmt (4096-Byte-Limit), statt verloren zu gehen. Verschlüsselungs-Overhead wird mitgerechnet.
+ 
+ ## Funktionsweise
+ 
+@@ -34,6 +35,28 @@ Die Schwellen sind global unter `levels` und pro Empfänger unter `recipients[].
+ 
+ `max_level` eines Empfängers gilt danach als harter Deckel, auch gegenüber `bark::params`. Der Device Key kann nicht per Nachricht überschrieben werden.
+ 
++### Nachrichtenlänge
++
++Apple (APNs) akzeptiert pro Push maximal 4096 Bytes für das gesamte Payload, inklusive Bark-Parametern und Apples eigenem Rahmen (`aps` mit alert, sound, category, thread-id). Der Bark-Server kürzt nicht; Apple antwortet mit `413 PayloadTooLarge` und die Nachricht kommt nie auf dem iPhone an.
++
++Das Plugin misst deshalb vor dem Senden die Grösse des Bark-JSON und kürzt bei Bedarf nur den Nachrichtentext (`body`), an einer Zeichengrenze, mit einem Marker am Ende. Titel, Level, Lautstärke und Gruppe bleiben unangetastet, ein Critical Alert kommt also immer. Jede Kürzung steht im Gotify-Log (`truncated body of message …`).
++
++Bei verschlüsselten Empfängern zählt nicht der Klartext, sondern der base64-Ciphertext: Klartext → PKCS7-Padding auf das nächste 16er-Vielfache → base64 × 4/3. Das kostet rund 1 KB Text.
++
++| Modus | Budget (Standard `max_payload: 3800`) | davon reiner Nachrichtentext (ungefähr) |
++|---|---|---|
++| unverschlüsselt | 3800 Bytes JSON | ca. 3500 Bytes |
++| verschlüsselt | ca. 2700 Bytes Klartext-JSON → ca. 3600 Bytes base64 | ca. 2500 Bytes |
++
++Umlaute zählen in UTF-8 doppelt, JSON-Escapes (`"`, `<`, `>`, Zeilenumbrüche) ebenfalls mehr als ein Byte.
++
++```yaml
++max_payload: 3800                       # Bytes, 0 = Standard
++truncate_marker: " … [gekürzt, vollständig in Gotify]"   # "" = kein Marker
++```
++
++Tipp: Mit `params: {url: https://gotify.example.ch}` beim Empfänger öffnet ein Tipp auf die Mitteilung den vollständigen Text in Gotify.
++
+ ## Konfiguration
+ 
+ Im Gotify-UI unter *Plugins → Bark Forwarder → Configurer*. Nach jeder Änderung das Plugin deaktivieren und wieder aktivieren.
+@@ -54,6 +77,9 @@ group_from_app: true                    # App-Name als Bark-Gruppe
+ groups:                                 # App-Name (oder App-ID) → Gruppe
+   Uptime-Kuma: Monitoring
+ 
++max_payload: 3800                       # Grössenbudget in Bytes (siehe Nachrichtenlänge)
++# truncate_marker: " …"                 # eigener Marker, "" = keiner
++
+ recipients:
+   - name: Device1
+     device_key: <bark device key>
+@@ -103,15 +129,22 @@ Alle Bark-Parameter (`sound`, `icon`, `url`, `call`, `badge`, `isArchive`, `copy
+ 
+ ## Build
+ 
+-Gotify lädt nur Plugins, die mit exakt derselben Go-Version und denselben Modul-Versionen wie der Server gebaut wurden.
++Gotify lädt nur Plugins, die mit exakt derselben Go-Version und denselben Modul-Versionen wie der Server gebaut wurden. Passt etwas nicht, startet Gotify gar nicht mehr (`plugin was built with a different version of package …`). Deshalb:
++
++- `go.mod` ist auf das `go.mod` von Gotify **v3.1.1** abgeglichen (Go 1.26.0). Bei einem Gotify-Update `make GOTIFY_VERSION=vX.Y.Z update-go-mod` ausführen und neu bauen.
++- Das Gotify-Image in `docker-compose.yaml` ist auf die Version gepinnt, für die das Plugin gebaut wurde. Ein `latest` würde beim nächsten Pull das Plugin und damit Gotify lahmlegen.
++- Gotify prüft beim Laden einen Fingerabdruck jedes gemeinsam genutzten Pakets, und darin stecken auch die Quellpfade. Der Build muss deshalb dasselbe Layout wie das `gotify/build`-Image haben (Go unter `/usr/local/go`, Modul-Cache unter `/go/pkg/mod`). Am einfachsten baut man direkt in diesem Image.
+ 
+-Mit Docker (offizieller Weg, `gotify/build`-Image):
++### Im Builder-Container (docker-compose)
++
++Die `docker-compose.yaml` enthält den Dienst `plugin-builder` (`gotify/build:1.26.0-linux-amd64`), der `/opt/gotify/tmp/proj` als Arbeitsverzeichnis und den Plugin-Ordner von Gotify als `/out` einbindet.
+ 
+ ```sh
+-make GOTIFY_VERSION=v3.1.1 build-linux-amd64
++docker compose up -d plugin-builder
++docker exec -it gotify-builder bash
+ ```
+ 
+-Ohne Docker auf einem Linux-Host mit gcc: Gotify prüft beim Laden einen Fingerabdruck jedes gemeinsam genutzten Pakets, und darin stecken auch die Quellpfade. Der Build muss deshalb dasselbe Layout wie das `gotify/build`-Image haben, also die passende Go-Version unter `/usr/local/go` und den Modul-Cache unter `/go/pkg/mod`. Das Target prüft die Go-Version und setzt den Cache-Pfad selbst:
++Im Container:
+ 
+ ```sh
+ # 1. Quellcode herunterladen
+@@ -125,11 +158,27 @@ go mod tidy
+ # 3. Plugin kompilieren
+ go build -a -installsuffix cgo -ldflags "-w -s" -buildmode=plugin -o gotify-bark.so
+ 
+-# 4. Kompilierte Datei verschieben
++# 4. Kompilierte Datei in den Plugin-Ordner von Gotify kopieren
+ cp gotify-bark.so /out/
+ ```
+ 
+-Die `.so` landet in `build/` und wird in das Plugin-Verzeichnis von Gotify kopiert (Docker: `/app/data/plugins`). Danach Gotify neu starten.
++Danach Gotify neu starten (`docker compose restart gotify`). Im Gotify-UI unter *Plugins* erscheint «Bark Forwarder» mit der Versionsnummer aus `plugin.go`.
++
++### Mit dem Makefile
++
++Mit Docker auf dem Host (zieht das passende `gotify/build`-Image selbst):
++
++```sh
++make GOTIFY_VERSION=v3.1.1 build-linux-amd64
++```
++
++Ohne Docker auf einem Linux-Host mit gcc, Go 1.26.0 unter `/usr/local/go` (das Target prüft die Go-Version und setzt den Cache-Pfad):
++
++```sh
++make GOTIFY_VERSION=v3.1.1 build-local
++```
++
++Die `.so` landet in `build/` und wird nach `/app/data/plugins` im Gotify-Container kopiert (`/opt/gotify/data/plugins` auf dem Host). Danach Gotify neu starten.
+ 
+ ## Tests
+ 
+diff --git a/config.go b/config.go
+index f3cf0cc..043b4d7 100644
+--- a/config.go
++++ b/config.go
+@@ -52,6 +52,28 @@ type Config struct {
+ 	Groups map[string]string `yaml:"groups,omitempty"`
+ 	// Recipients is the list of Bark devices to forward to, each with its own rules.
+ 	Recipients []Recipient `yaml:"recipients"`
++
++	// MaxPayload is the size budget in bytes for the JSON sent to Bark (for encrypted recipients:
++	// the base64 ciphertext). Apple rejects APNs payloads above 4096 bytes including its own
++	// framing, so the default keeps a reserve. Longer message bodies are truncated. 0 = default.
++	MaxPayload int `yaml:"max_payload,omitempty"`
++	// TruncateMarker is appended to a truncated body. nil (key missing) = default marker, "" = none.
++	TruncateMarker *string `yaml:"truncate_marker,omitempty"`
++}
++
++// defaultMaxPayload leaves roughly 300 bytes of the 4096-byte APNs limit for Apple's framing
++// (aps dictionary with alert, sound, category, mutable-content, thread-id).
++const defaultMaxPayload = 3800
++
++// defaultTruncateMarker is appended to bodies that had to be shortened.
++const defaultTruncateMarker = " … [gekürzt, vollständig in Gotify]"
++
++// truncateMarker returns the configured marker or the default.
++func (c *Config) truncateMarker() string {
++	if c.TruncateMarker == nil {
++		return defaultTruncateMarker
++	}
++	return *c.TruncateMarker
+ }
+ 
+ // LevelConfig defines the priority thresholds for the Bark level mapping.
+@@ -147,6 +169,7 @@ func (c *BarkForwardPlugin) DefaultConfig() any {
+ 		GotifyClientToken: "",
+ 		BarkURL:           "https://api.day.app/push",
+ 		ReconnectDelay:    10,
++		MaxPayload:        defaultMaxPayload,
+ 		Levels: LevelConfig{
+ 			PassiveMax:        intPtr(0),
+ 			TimeSensitiveFrom: intPtr(8),
+@@ -180,6 +203,12 @@ func (c *BarkForwardPlugin) ValidateAndSetConfig(config any) error {
+ 	if newConfig.ReconnectDelay <= 0 {
+ 		newConfig.ReconnectDelay = 10
+ 	}
++	if newConfig.MaxPayload <= 0 {
++		newConfig.MaxPayload = defaultMaxPayload
++	}
++	if len(newConfig.truncateMarker()) >= newConfig.MaxPayload/2 {
++		return fmt.Errorf("config: truncate_marker is too long for max_payload %d", newConfig.MaxPayload)
++	}
+ 	if newConfig.GotifyHTTPURL == "" {
+ 		newConfig.GotifyHTTPURL = httpURLFromWS(newConfig.GotifyHost)
+ 	}
+diff --git a/docker-compose.yaml b/docker-compose.yaml
+index 675bdd0..42fe36a 100644
+--- a/docker-compose.yaml
++++ b/docker-compose.yaml
+@@ -1,6 +1,8 @@
+ services:
+   gotify:
+-    image: gotify/server:latest
++    # Auf die Version gepinnt, für die das Plugin gebaut ist (siehe README → Build).
++    # Bei einem Update: Version hier UND im plugin-builder-Image anpassen, Plugin neu bauen.
++    image: gotify/server:3.1.1
+     container_name: gotify
+     restart: unless-stopped
+     environment:
+diff --git a/forward.go b/forward.go
+index d42d08e..fa64317 100644
+--- a/forward.go
++++ b/forward.go
+@@ -166,6 +166,11 @@ func (c *BarkForwardPlugin) forwardToBark(msg streamMessage) {
+ 			continue
+ 		}
+ 		req := c.buildBarkRequest(r, msg, appName)
++		encrypted := r.EncryptionKey != "" && r.EncryptionIV != ""
++		if before, after := fitPayload(req, encrypted, c.config.MaxPayload, c.config.truncateMarker()); after != before {
++			logf("truncated body of message %d for recipient %q from %d to %d bytes (max_payload %d, encrypted=%t)",
++				msg.ID, r.Name, before, after, c.config.MaxPayload, encrypted)
++		}
+ 		if err := c.sendToBark(r, req); err != nil {
+ 			logf("failed to forward message %d to recipient %q: %v", msg.ID, r.Name, err)
+ 			continue
+diff --git a/go.mod b/go.mod
+index 784e526..9cf235e 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,4 +1,4 @@
+-module github.com/p3ddd/gotify-bark
++module github.com/helmi1987/gotify-bark
+ 
+ go 1.25.0
+ 
+diff --git a/payload.go b/payload.go
+new file mode 100644
+index 0000000..6f812f1
+--- /dev/null
++++ b/payload.go
+@@ -0,0 +1,108 @@
++package main
++
++import (
++	"crypto/aes"
++	"encoding/json"
++	"unicode/utf8"
++)
++
++// apnsPayloadMaximum is Apple's hard limit for a remote notification payload.
++const apnsPayloadMaximum = 4096
++
++// maxTruncateRounds bounds the shrink loop. Each round cuts a proportional estimate of the
++// excess; JSON escaping and base64 rounding make the size non-linear in the body length,
++// so a few rounds may be needed. The final round guarantees the budget.
++const maxTruncateRounds = 20
++
++// encryptedSize returns the base64 length of an AES-CBC/PKCS7 ciphertext for n plaintext bytes.
++// Padding always adds 1..16 bytes so the padded length is the next multiple of 16 above n.
++func encryptedSize(n int) int {
++	padded := (n/aes.BlockSize + 1) * aes.BlockSize
++	return (padded + 2) / 3 * 4
++}
++
++// payloadSize returns the number of bytes that count against the Bark/APNs budget for the
++// given Bark JSON: the JSON itself for plain pushes, the base64 ciphertext for encrypted ones.
++func payloadSize(jsonLen int, encrypted bool) int {
++	if encrypted {
++		return encryptedSize(jsonLen)
++	}
++	return jsonLen
++}
++
++// jsonStringLen returns the number of bytes s occupies inside a JSON document (escaped,
++// without the surrounding quotes).
++func jsonStringLen(s string) int {
++	b, err := json.Marshal(s)
++	if err != nil {
++		return len(s)
++	}
++	return len(b) - 2
++}
++
++// cutUTF8 shortens s to at most n bytes without splitting a multi-byte character.
++func cutUTF8(s string, n int) string {
++	if n <= 0 {
++		return ""
++	}
++	if n >= len(s) {
++		return s
++	}
++	for n > 0 && !utf8.RuneStart(s[n]) {
++		n--
++	}
++	return s[:n]
++}
++
++// fitPayload shortens req["body"] until the payload fits into budget bytes. It returns the
++// original and the final body length in bytes (equal when nothing was cut). Only the body is
++// touched; title, level, volume, group and all other parameters stay intact. If even an empty
++// body does not fit, the request is left with an empty body so the alert itself gets through.
++func fitPayload(req map[string]any, encrypted bool, budget int, marker string) (before, after int) {
++	body, _ := req["body"].(string)
++	before = len(body)
++
++	data, err := json.Marshal(req)
++	if err != nil || payloadSize(len(data), encrypted) <= budget {
++		return before, before
++	}
++
++	remaining := body
++	markerPending := true // the marker is not part of the JSON until the first cut
++	for round := 0; round < maxTruncateRounds && remaining != ""; round++ {
++		excess := payloadSize(len(data), encrypted) - budget
++		if excess <= 0 {
++			break
++		}
++		if markerPending {
++			excess += jsonStringLen(marker)
++			if encrypted {
++				excess += aes.BlockSize // padding/base64 rounding reserve
++			}
++		}
++		if encrypted {
++			excess = excess*3/4 + 1 // base64 bytes -> JSON bytes
++		}
++		// JSON bytes -> raw body bytes: escaping only inflates, so scale by the body's ratio.
++		cut := excess
++		if bodyJSON := jsonStringLen(remaining); bodyJSON > len(remaining) {
++			cut = excess*len(remaining)/bodyJSON + 1
++		}
++		if round == maxTruncateRounds-1 {
++			cut = len(remaining) // last resort: drop the rest
++		}
++		remaining = cutUTF8(remaining, len(remaining)-cut)
++		markerPending = false
++		if remaining == "" {
++			req["body"] = ""
++		} else {
++			req["body"] = remaining + marker
++		}
++		if data, err = json.Marshal(req); err != nil {
++			break
++		}
++	}
++
++	final, _ := req["body"].(string)
++	return before, len(final)
++}
+diff --git a/payload_test.go b/payload_test.go
+new file mode 100644
+index 0000000..bfc25af
+--- /dev/null
++++ b/payload_test.go
+@@ -0,0 +1,227 @@
++package main
++
++import (
++	"encoding/json"
++	"io"
++	"net/http"
++	"strings"
++	"testing"
++	"unicode/utf8"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestEncryptedSizeMatchesRealCiphertext(t *testing.T) {
++	// The estimate must equal the real base64 length for every padding case.
++	for n := 0; n < 100; n++ {
++		plain := []byte(strings.Repeat("x", n))
++		ct, err := encryptAESCBC("1234567890123456", "1234567890123456", plain)
++		require.NoError(t, err)
++		assert.Equal(t, len(ct), encryptedSize(n), "plaintext length %d", n)
++	}
++	for _, n := range []int{2700, 2703, 2704, 2705, 3000, 4096} {
++		plain := []byte(strings.Repeat("y", n))
++		ct, err := encryptAESCBC("12345678901234567890123456789012", "1234567890123456", plain)
++		require.NoError(t, err)
++		assert.Equal(t, len(ct), encryptedSize(n), "plaintext length %d", n)
++	}
++}
++
++func TestCutUTF8(t *testing.T) {
++	s := "Grüezi wohl" // ü = 2 bytes at index 2..3
++	assert.Equal(t, "Gr", cutUTF8(s, 3), "must not split the ü")
++	assert.Equal(t, "Grü", cutUTF8(s, 4))
++	assert.Equal(t, s, cutUTF8(s, 100))
++	assert.Equal(t, "", cutUTF8(s, 0))
++	assert.True(t, utf8.ValidString(cutUTF8("äöüäöüäöü", 7)))
++}
++
++func baseRequest(body string) map[string]any {
++	return map[string]any{
++		"device_key": "abcdefghijklmnopqrstuv",
++		"title":      "Server down",
++		"body":       body,
++		"level":      LevelCritical,
++		"volume":     7,
++		"group":      "Uptime-Kuma",
++	}
++}
++
++func TestFitPayloadLeavesShortMessagesAlone(t *testing.T) {
++	req := baseRequest("kurz")
++	before, after := fitPayload(req, false, defaultMaxPayload, defaultTruncateMarker)
++	assert.Equal(t, 4, before)
++	assert.Equal(t, 4, after)
++	assert.Equal(t, "kurz", req["body"])
++
++	req = baseRequest("kurz")
++	_, after = fitPayload(req, true, defaultMaxPayload, defaultTruncateMarker)
++	assert.Equal(t, 4, after)
++}
++
++func TestFitPayloadPlain(t *testing.T) {
++	long := strings.Repeat("Zeile mit Log-Ausgabe 0123456789\n", 200) // ~6.6 KB
++	req := baseRequest(long)
++	before, after := fitPayload(req, false, defaultMaxPayload, defaultTruncateMarker)
++
++	assert.Equal(t, len(long), before)
++	assert.Less(t, after, before)
++	body := req["body"].(string)
++	assert.True(t, strings.HasSuffix(body, defaultTruncateMarker))
++	assert.True(t, strings.HasPrefix(long, strings.TrimSuffix(body, defaultTruncateMarker)), "body is a prefix of the original")
++
++	data, err := json.Marshal(req)
++	require.NoError(t, err)
++	assert.LessOrEqual(t, len(data), defaultMaxPayload)
++	assert.Greater(t, len(data), defaultMaxPayload-200, "should not cut much more than necessary")
++
++	// everything else untouched
++	assert.Equal(t, "Server down", req["title"])
++	assert.Equal(t, LevelCritical, req["level"])
++	assert.Equal(t, 7, req["volume"])
++	assert.Equal(t, "Uptime-Kuma", req["group"])
++	assert.Equal(t, "abcdefghijklmnopqrstuv", req["device_key"])
++}
++
++func TestFitPayloadEncryptedUsesBase64Size(t *testing.T) {
++	// ~3000 bytes fits plain (3000 + ~120 overhead < 3800) but not encrypted (base64 ~4200).
++	long := strings.Repeat("abcdefghij", 300)
++
++	plain := baseRequest(long)
++	_, after := fitPayload(plain, false, defaultMaxPayload, defaultTruncateMarker)
++	assert.Equal(t, len(long), after, "fits unencrypted, nothing to cut")
++
++	enc := baseRequest(long)
++	before, after := fitPayload(enc, true, defaultMaxPayload, defaultTruncateMarker)
++	assert.Equal(t, len(long), before)
++	assert.Less(t, after, before, "must be cut when encrypted")
++
++	data, err := json.Marshal(enc)
++	require.NoError(t, err)
++	ct, err := encryptAESCBC("1234567890123456", "1234567890123456", data)
++	require.NoError(t, err)
++	assert.LessOrEqual(t, len(ct), defaultMaxPayload, "real ciphertext must fit the budget")
++	assert.Greater(t, len(ct), defaultMaxPayload-200, "should not cut much more than necessary")
++}
++
++func TestFitPayloadUmlautsAndEscaping(t *testing.T) {
++	// multi-byte characters and JSON-escaped characters ("<", quotes, newlines) inflate the JSON
++	long := strings.Repeat("Grüezi \"Welt\" <ä/ö/ü>\n", 300)
++	req := baseRequest(long)
++	fitPayload(req, false, 1000, "…")
++
++	body := req["body"].(string)
++	assert.True(t, utf8.ValidString(body), "cut must not produce invalid UTF-8")
++	assert.True(t, strings.HasSuffix(body, "…"))
++	data, err := json.Marshal(req)
++	require.NoError(t, err)
++	assert.LessOrEqual(t, len(data), 1000)
++	assert.Greater(t, len(data), 700)
++}
++
++func TestFitPayloadEmptyMarker(t *testing.T) {
++	req := baseRequest(strings.Repeat("x", 5000))
++	fitPayload(req, false, 1000, "")
++	body := req["body"].(string)
++	assert.False(t, strings.Contains(body, "…"))
++	data, _ := json.Marshal(req)
++	assert.LessOrEqual(t, len(data), 1000)
++}
++
++func TestFitPayloadTinyBudgetDropsBody(t *testing.T) {
++	// budget smaller than title + params: the body goes, the alert itself stays
++	req := baseRequest(strings.Repeat("x", 500))
++	fitPayload(req, false, 100, defaultTruncateMarker)
++	assert.Equal(t, "", req["body"])
++	assert.Equal(t, LevelCritical, req["level"])
++	assert.Equal(t, 7, req["volume"])
++}
++
++func TestForwardTruncatesBeforeSending(t *testing.T) {
++	// end to end through forwardToBark with the default config
++	cfg := validConfig()
++	cfg.Recipients = []Recipient{
++		{Name: "plain", DeviceKey: "k1"},
++		{Name: "enc", DeviceKey: "k2", EncryptionKey: "1234567890123456", EncryptionIV: "1234567890123456"},
++	}
++	p := configuredPlugin(t, cfg)
++
++	var sizes []int
++	p.httpClient = newRecordingClient(func(path string, body []byte) {
++		sizes = append(sizes, len(body))
++	})
++
++	p.forwardToBark(streamMessage{ID: 1, AppID: 1, Title: "T", Message: strings.Repeat("lang ", 2000), Priority: 12})
++	require.Len(t, sizes, 2)
++	assert.LessOrEqual(t, sizes[0], defaultMaxPayload, "plain JSON within budget")
++	// encrypted request body is {"ciphertext":"<base64>"}: base64 within budget plus wrapper
++	assert.LessOrEqual(t, sizes[1], defaultMaxPayload+len(`{"ciphertext":""}`))
++}
++
++// recordingTransport answers every request with 200 and hands path and body to fn.
++type recordingTransport struct {
++	fn func(path string, body []byte)
++}
++
++func (rt recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
++	body, _ := io.ReadAll(req.Body)
++	rt.fn(req.URL.Path, body)
++	return &http.Response{
++		StatusCode: http.StatusOK,
++		Status:     "200 OK",
++		Body:       io.NopCloser(strings.NewReader(`{"code":200}`)),
++		Header:     http.Header{},
++		Request:    req,
++	}, nil
++}
++
++func newRecordingClient(fn func(path string, body []byte)) *http.Client {
++	return &http.Client{Transport: recordingTransport{fn: fn}}
++}
++
++func TestMaxPayloadConfig(t *testing.T) {
++	p := &BarkForwardPlugin{}
++	cfg := validConfig()
++	require.NoError(t, p.ValidateAndSetConfig(cfg))
++	assert.Equal(t, defaultMaxPayload, p.config.MaxPayload)
++	assert.Equal(t, defaultTruncateMarker, p.config.truncateMarker())
++
++	cfg = validConfig()
++	cfg.MaxPayload = 2000
++	empty := ""
++	cfg.TruncateMarker = &empty
++	require.NoError(t, p.ValidateAndSetConfig(cfg))
++	assert.Equal(t, 2000, p.config.MaxPayload)
++	assert.Equal(t, "", p.config.truncateMarker())
++
++	cfg = validConfig()
++	cfg.MaxPayload = 40
++	err := p.ValidateAndSetConfig(cfg)
++	require.Error(t, err)
++	assert.Contains(t, err.Error(), "truncate_marker is too long")
++}
++
++func TestFitPayloadProperty(t *testing.T) {
++	// Many budgets, plain and encrypted, mixed content: always within budget, never wasteful,
++	// body always a valid UTF-8 prefix of the original plus marker (or empty).
++	unit := "Grüezi \"Welt\" <ä/ö/ü> plain text 0123456789\n"
++	long := strings.Repeat(unit, 400)
++	for _, encrypted := range []bool{false, true} {
++		for budget := 300; budget <= 4096; budget += 37 {
++			req := baseRequest(long)
++			fitPayload(req, encrypted, budget, defaultTruncateMarker)
++			data, err := json.Marshal(req)
++			require.NoError(t, err)
++			size := payloadSize(len(data), encrypted)
++			assert.LessOrEqual(t, size, budget, "encrypted=%v budget=%d", encrypted, budget)
++			body := req["body"].(string)
++			assert.True(t, utf8.ValidString(body))
++			if body != "" {
++				assert.True(t, strings.HasSuffix(body, defaultTruncateMarker), "encrypted=%v budget=%d", encrypted, budget)
++				assert.True(t, strings.HasPrefix(long, strings.TrimSuffix(body, defaultTruncateMarker)))
++				assert.Greater(t, size, budget-250, "wasted budget: encrypted=%v budget=%d size=%d", encrypted, budget, size)
++			}
++		}
++	}
++}
+diff --git a/plugin.go b/plugin.go
+index 3bb99d0..01131f0 100644
+--- a/plugin.go
++++ b/plugin.go
+@@ -17,7 +17,7 @@ import (
+ func GetGotifyPluginInfo() plugin.Info {
+ 	return plugin.Info{
+ 		ModulePath:  "github.com/helmi1987/gotify-bark",
+-		Version:     "0.3.0",
++		Version:     "0.3.1",
+ 		Author:      "Petrichor, extended by Benj Müller",
+ 		Website:     "https://github.com/helmi1987/gotify-bark",
+ 		License:     "MIT",
+@@ -109,6 +109,14 @@ Jeder Eintrag ist ein Bark-Gerät mit eigenen Regeln:
+ - **levels**: Eigene Schwellen (passive_max, timesensitive_from, critical_from) für diesen Empfänger.
+ - **encryption_key / encryption_iv**: AES-CBC-Verschlüsselung (Key 16 oder 32 Bytes, IV 16 Bytes). Leer = unverschlüsselt.
+ 
++#### Nachrichtenlänge (max_payload)
++
++Apple nimmt pro Push höchstens 4096 Bytes an, inklusive Bark-Parametern und Apples eigenem Rahmen. Der Bark-Server kürzt nicht, Apple lehnt zu grosse Pushes ab und die Nachricht käme nie an.
++Das Plugin kürzt deshalb den Nachrichtentext (nur ` + "`body`" + `, nie Titel, Level oder Gruppe), bis das Bark-JSON in ` + "`max_payload`" + ` Bytes passt (Standard 3800). Bei verschlüsselten Empfängern zählt die Länge des base64-Ciphertexts, das kostet rund 1 KB Text.
++
++- **max_payload**: Budget in Bytes (Standard 3800, 0 = Standard).
++- **truncate_marker**: Text, der an gekürzte Nachrichten angehängt wird. Weglassen = Standardmarker, ` + "`\"\"`" + ` = kein Marker.
++
+ #### Gruppen
+ 
+ - **group_from_app** (Standard true): Der Name der Gotify-App wird als Bark-Gruppe verwendet.
+@@ -137,6 +145,7 @@ levels:
+ group_from_app: true
+ groups:
+   Uptime-Kuma: Monitoring
++max_payload: 3800
+ recipients:
+   - name: max_config_for_device         # Devicename ect.
+     device_key: <bark device key>
+-- 
+2.43.0
+

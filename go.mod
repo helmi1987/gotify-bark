@@ -1,4 +1,4 @@
-module github.com/p3ddd/gotify-bark
+module github.com/helmi1987/gotify-bark
 
 go 1.25.0
 

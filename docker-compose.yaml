@@ -1,6 +1,8 @@
 services:
   gotify:
-    image: gotify/server:latest
+    # Auf die Version gepinnt, für die das Plugin gebaut ist (siehe README → Build).
+    # Bei einem Update: Version hier UND im plugin-builder-Image anpassen, Plugin neu bauen.
+    image: gotify/server:3.1.1
     container_name: gotify
     restart: unless-stopped
     environment:

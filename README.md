@@ -8,6 +8,7 @@ Fork von [p3ddd/gotify-bark](https://github.com/p3ddd/gotify-bark), erweitert um
 - **Mehrere Empfänger** pro Gotify-Benutzer, jeder mit eigenem Device Key, Mindestpriorität, Level-Deckel, App-Filter, Zusatzparametern und optionaler Verschlüsselung.
 - **Gruppen**: Standardmässig der Name der Gotify-App, pro App oder pro Empfänger überschreibbar.
 - Alles weiterhin pro Nachricht über das Extra `bark::params` übersteuerbar.
+- **Längenbegrenzung**: Lange Nachrichten werden so gekürzt, dass Apple sie annimmt (4096-Byte-Limit), statt verloren zu gehen. Verschlüsselungs-Overhead wird mitgerechnet.
 
 ## Funktionsweise
 
@@ -34,6 +35,28 @@ Die Schwellen sind global unter `levels` und pro Empfänger unter `recipients[].
 
 `max_level` eines Empfängers gilt danach als harter Deckel, auch gegenüber `bark::params`. Der Device Key kann nicht per Nachricht überschrieben werden.
 
+### Nachrichtenlänge
+
+Apple (APNs) akzeptiert pro Push maximal 4096 Bytes für das gesamte Payload, inklusive Bark-Parametern und Apples eigenem Rahmen (`aps` mit alert, sound, category, thread-id). Der Bark-Server kürzt nicht; Apple antwortet mit `413 PayloadTooLarge` und die Nachricht kommt nie auf dem iPhone an.
+
+Das Plugin misst deshalb vor dem Senden die Grösse des Bark-JSON und kürzt bei Bedarf nur den Nachrichtentext (`body`), an einer Zeichengrenze, mit einem Marker am Ende. Titel, Level, Lautstärke und Gruppe bleiben unangetastet, ein Critical Alert kommt also immer. Jede Kürzung steht im Gotify-Log (`truncated body of message …`).
+
+Bei verschlüsselten Empfängern zählt nicht der Klartext, sondern der base64-Ciphertext: Klartext → PKCS7-Padding auf das nächste 16er-Vielfache → base64 × 4/3. Das kostet rund 1 KB Text.
+
+| Modus | Budget (Standard `max_payload: 3800`) | davon reiner Nachrichtentext (ungefähr) |
+|---|---|---|
+| unverschlüsselt | 3800 Bytes JSON | ca. 3500 Bytes |
+| verschlüsselt | ca. 2700 Bytes Klartext-JSON → ca. 3600 Bytes base64 | ca. 2500 Bytes |
+
+Umlaute zählen in UTF-8 doppelt, JSON-Escapes (`"`, `<`, `>`, Zeilenumbrüche) ebenfalls mehr als ein Byte.
+
+```yaml
+max_payload: 3800                       # Bytes, 0 = Standard
+truncate_marker: " … [gekürzt, vollständig in Gotify]"   # "" = kein Marker
+```
+
+Tipp: Mit `params: {url: https://gotify.example.ch}` beim Empfänger öffnet ein Tipp auf die Mitteilung den vollständigen Text in Gotify.
+
 ## Konfiguration
 
 Im Gotify-UI unter *Plugins → Bark Forwarder → Configurer*. Nach jeder Änderung das Plugin deaktivieren und wieder aktivieren.
@@ -53,6 +76,9 @@ levels:                                 # globale Schwellen
 group_from_app: true                    # App-Name als Bark-Gruppe
 groups:                                 # App-Name (oder App-ID) → Gruppe
   Uptime-Kuma: Monitoring
+
+max_payload: 3800                       # Grössenbudget in Bytes (siehe Nachrichtenlänge)
+# truncate_marker: " …"                 # eigener Marker, "" = keiner
 
 recipients:
   - name: Device1
@@ -103,15 +129,22 @@ Alle Bark-Parameter (`sound`, `icon`, `url`, `call`, `badge`, `isArchive`, `copy
 
 ## Build
 
-Gotify lädt nur Plugins, die mit exakt derselben Go-Version und denselben Modul-Versionen wie der Server gebaut wurden.
+Gotify lädt nur Plugins, die mit exakt derselben Go-Version und denselben Modul-Versionen wie der Server gebaut wurden. Passt etwas nicht, startet Gotify gar nicht mehr (`plugin was built with a different version of package …`). Deshalb:
 
-Mit Docker (offizieller Weg, `gotify/build`-Image):
+- `go.mod` ist auf das `go.mod` von Gotify **v3.1.1** abgeglichen (Go 1.26.0). Bei einem Gotify-Update `make GOTIFY_VERSION=vX.Y.Z update-go-mod` ausführen und neu bauen.
+- Das Gotify-Image in `docker-compose.yaml` ist auf die Version gepinnt, für die das Plugin gebaut wurde. Ein `latest` würde beim nächsten Pull das Plugin und damit Gotify lahmlegen.
+- Gotify prüft beim Laden einen Fingerabdruck jedes gemeinsam genutzten Pakets, und darin stecken auch die Quellpfade. Der Build muss deshalb dasselbe Layout wie das `gotify/build`-Image haben (Go unter `/usr/local/go`, Modul-Cache unter `/go/pkg/mod`). Am einfachsten baut man direkt in diesem Image.
+
+### Im Builder-Container (docker-compose)
+
+Die `docker-compose.yaml` enthält den Dienst `plugin-builder` (`gotify/build:1.26.0-linux-amd64`), der `/opt/gotify/tmp/proj` als Arbeitsverzeichnis und den Plugin-Ordner von Gotify als `/out` einbindet.
 
 ```sh
-make GOTIFY_VERSION=v3.1.1 build-linux-amd64
+docker compose up -d plugin-builder
+docker exec -it gotify-builder bash
 ```
 
-Ohne Docker auf einem Linux-Host mit gcc: Gotify prüft beim Laden einen Fingerabdruck jedes gemeinsam genutzten Pakets, und darin stecken auch die Quellpfade. Der Build muss deshalb dasselbe Layout wie das `gotify/build`-Image haben, also die passende Go-Version unter `/usr/local/go` und den Modul-Cache unter `/go/pkg/mod`. Das Target prüft die Go-Version und setzt den Cache-Pfad selbst:
+Im Container:
 
 ```sh
 # 1. Quellcode herunterladen
@@ -125,11 +158,27 @@ go mod tidy
 # 3. Plugin kompilieren
 go build -a -installsuffix cgo -ldflags "-w -s" -buildmode=plugin -o gotify-bark.so
 
-# 4. Kompilierte Datei verschieben
+# 4. Kompilierte Datei in den Plugin-Ordner von Gotify kopieren
 cp gotify-bark.so /out/
 ```
 
-Die `.so` landet in `build/` und wird in das Plugin-Verzeichnis von Gotify kopiert (Docker: `/app/data/plugins`). Danach Gotify neu starten.
+Danach Gotify neu starten (`docker compose restart gotify`). Im Gotify-UI unter *Plugins* erscheint «Bark Forwarder» mit der Versionsnummer aus `plugin.go`.
+
+### Mit dem Makefile
+
+Mit Docker auf dem Host (zieht das passende `gotify/build`-Image selbst):
+
+```sh
+make GOTIFY_VERSION=v3.1.1 build-linux-amd64
+```
+
+Ohne Docker auf einem Linux-Host mit gcc, Go 1.26.0 unter `/usr/local/go` (das Target prüft die Go-Version und setzt den Cache-Pfad):
+
+```sh
+make GOTIFY_VERSION=v3.1.1 build-local
+```
+
+Die `.so` landet in `build/` und wird nach `/app/data/plugins` im Gotify-Container kopiert (`/opt/gotify/data/plugins` auf dem Host). Danach Gotify neu starten.
 
 ## Tests
 

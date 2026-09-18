@@ -166,6 +166,11 @@ func (c *BarkForwardPlugin) forwardToBark(msg streamMessage) {
 			continue
 		}
 		req := c.buildBarkRequest(r, msg, appName)
+		encrypted := r.EncryptionKey != "" && r.EncryptionIV != ""
+		if before, after := fitPayload(req, encrypted, c.config.MaxPayload, c.config.truncateMarker()); after != before {
+			logf("truncated body of message %d for recipient %q from %d to %d bytes (max_payload %d, encrypted=%t)",
+				msg.ID, r.Name, before, after, c.config.MaxPayload, encrypted)
+		}
 		if err := c.sendToBark(r, req); err != nil {
 			logf("failed to forward message %d to recipient %q: %v", msg.ID, r.Name, err)
 			continue
