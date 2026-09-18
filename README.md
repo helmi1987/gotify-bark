@@ -160,6 +160,7 @@ git clone https://github.com/helmi1987/gotify-bark.git .
 Bauen mit `build.sh`. Das Script fragt die **laufende Gotify** nach ihrer Version (`GET /version`), lädt zu genau diesem Tag `GO_VERSION` und `go.mod` von GitHub, prüft, ob die Go-Version im Container passt, gleicht `go.mod` ab und legt die `.so` nach `/out`:
 
 ```sh
+chmod +x build.sh
 ./build.sh                # Version von http://gotify:80 holen, bauen, nach /out kopieren
 DRY_RUN=1 ./build.sh      # nur prüfen, ob alles zusammenpasst
 ./build.sh -h             # alle Umgebungsvariablen (GOTIFY_URL, GOTIFY_VERSION, OUT_DIR, …)
