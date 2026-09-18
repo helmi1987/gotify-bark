@@ -128,7 +128,7 @@ Alle Bark-Parameter lassen sich pro Nachricht über das Extra ` + "`bark::params
 ` + "```yaml" + `
 gotify_host: ws://gotify:80
 gotify_client_token: <client token>
-bark_url: hhttp://bark-server:8080/push
+bark_url: http://bark-server:8080/push
 reconnect_delay: 10
 levels:
   passive_max: 0
