@@ -1,18 +1,11 @@
 package main
 
 import (
-	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
-	"maps"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -24,11 +17,11 @@ import (
 func GetGotifyPluginInfo() plugin.Info {
 	return plugin.Info{
 		ModulePath:  "github.com/p3ddd/gotify-bark",
-		Version:     "0.2.0",
-		Author:      "Petrichor",
+		Version:     "0.3.0",
+		Author:      "Petrichor, extended by Benj Müller",
 		Website:     "https://github.com/p3ddd/gotify-bark",
 		License:     "MIT",
-		Description: "Forwards Gotify messages to Bark by acting as a WebSocket client.",
+		Description: "Forwards Gotify messages to one or more Bark devices with priority based levels (critical/timeSensitive), groups and per-recipient rules.",
 		Name:        "Bark Forwarder",
 	}
 }
@@ -39,62 +32,14 @@ type BarkForwardPlugin struct {
 	done chan struct{}
 	// config holds the user-provided configuration
 	config *Config
-	// httpClient is a shared HTTP client with timeout for Bark requests
+	// httpClient is a shared HTTP client with timeout for Bark and Gotify requests
 	httpClient *http.Client
+	// apps caches Gotify application names by id
+	apps appCache
 }
 
-// Config defines the plugin config scheme.
-type Config struct {
-	// The WebSocket URL of the Gotify server, e.g., "ws://localhost:80"
-	GotifyHost string `yaml:"gotify_host"`
-	// A client token from Gotify for the plugin to use
-	GotifyClientToken string `yaml:"gotify_client_token"`
-	// The device key for your Bark account
-	BarkDeviceKey string `yaml:"bark_device_key"`
-	// The Bark server push URL
-	BarkURL string `yaml:"bark_url"`
-	// ReconnectDelay is the delay in seconds before trying to reconnect.
-	ReconnectDelay int `yaml:"reconnect_delay,omitempty"`
-	// EncryptionKey is the AES encryption key (16 bytes for AES-128, 32 bytes for AES-256). Leave empty to disable encryption.
-	EncryptionKey string `yaml:"encryption_key,omitempty"`
-	// EncryptionIV is the AES CBC initialization vector (must be 16 bytes). Leave empty to disable encryption.
-	EncryptionIV string `yaml:"encryption_iv,omitempty"`
-}
-
-// DefaultConfig implements plugin.Configurer.
-func (c *BarkForwardPlugin) DefaultConfig() any {
-	return &Config{
-		GotifyHost:        "ws://gotify:80",
-		GotifyClientToken: "",
-		BarkDeviceKey:     "",
-		BarkURL:           "http://bark-server:8080/push",
-		ReconnectDelay:    10,
-	}
-}
-
-// ValidateAndSetConfig implements plugin.Configurer.
-func (c *BarkForwardPlugin) ValidateAndSetConfig(config any) error {
-	newConfig := config.(*Config)
-
-	if newConfig.GotifyHost == "" {
-		return errors.New("config: GotifyHost cannot be empty")
-	}
-	if newConfig.GotifyClientToken == "" {
-		return errors.New("config: GotifyClientToken cannot be empty. Create a client in Gotify for this plugin")
-	}
-	if newConfig.BarkDeviceKey == "" {
-		return errors.New("config: BarkDeviceKey key cannot be empty")
-	}
-	if newConfig.BarkURL == "" {
-		return errors.New("config: BarkURL cannot be empty")
-	}
-	if newConfig.ReconnectDelay <= 0 {
-		newConfig.ReconnectDelay = 10
-	}
-
-	c.config = newConfig
-	log.Println("Bark Forwarder plugin configuration updated and validated.")
-	return nil
+func logf(format string, args ...any) {
+	log.Printf("Bark Forwarder: "+format, args...)
 }
 
 // Enable enables the plugin.
@@ -103,28 +48,22 @@ func (c *BarkForwardPlugin) Enable() error {
 		return errors.New("plugin is not configured yet")
 	}
 
-	// Initialize the done channel
 	c.done = make(chan struct{})
+	c.httpClient = &http.Client{Timeout: 30 * time.Second}
+	c.apps = appCache{}
 
-	// Initialize HTTP client with timeout
-	c.httpClient = &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	// Start the message listening goroutine
 	go c.listenForMessages()
 
-	log.Println("Bark Forwarder (WebSocket) plugin enabled.")
+	logf("plugin enabled.")
 	return nil
 }
 
 // Disable disables the plugin.
 func (c *BarkForwardPlugin) Disable() error {
-	// Signal the goroutine to stop by closing the done channel
 	if c.done != nil {
 		close(c.done)
 	}
-	log.Println("Bark Forwarder (WebSocket) plugin disabled.")
+	logf("plugin disabled.")
 	return nil
 }
 
@@ -132,41 +71,91 @@ func (c *BarkForwardPlugin) Disable() error {
 // This method provides instructions on the plugin's page in the Gotify UI.
 func (c *BarkForwardPlugin) GetDisplay(location *url.URL) string {
 	return `
-### Bark Forwarder 设置说明
+### Bark Forwarder – Anleitung
 
-本插件是为将 Gotify 消息转发到 Bark 而设计的专用插件。它通过连接到 Gotify 的 WebSocket 消息流来接收所有消息，并将其转发到你的 Bark 客户端。
+Das Plugin verbindet sich als WebSocket-Client mit dem Gotify-Stream dieses Benutzers und leitet jede Nachricht an einen oder mehrere Bark-Empfänger weiter.
+Die Gotify-Priorität bestimmt dabei den Bark-Level (passive / active / timeSensitive / critical) und bei Critical Alerts die Lautstärke.
 
-**请按以下步骤配置：**
+**Wichtig:** Nach jeder Änderung der Konfiguration das Plugin **deaktivieren** und wieder **aktivieren**.
 
-1.  **Gotify Host**: 填写你的 Gotify 服务器的 WebSocket 地址。
-    -   例如: 如果你的 Gotify 访问地址是 'http://192.168.1.10:8080'，这里就填 'ws://192.168.1.10:8080'。
-    -   如果使用了 HTTPS，请使用 'wss://'。
+#### Verbindung
 
-2.  **Gotify Client Token**: 需要为本插件创建一个专用的客户端 Token。
-    -   请前往 Gotify 的 **"Clients"** 标签页。
-    -   点击 "Create Client"，取一个名字（例如 'bark-plugin-client'）。
-    -   **复制生成的 Token** 并粘贴到此处。
+- **gotify_host**: WebSocket-Adresse des Gotify-Servers, z. B. ` + "`ws://192.168.1.10:8080`" + ` bzw. ` + "`wss://gotify.example.ch`" + ` bei HTTPS.
+- **gotify_client_token**: Unter *Clients* einen neuen Client (z. B. ` + "`bark-plugin`" + `) anlegen und dessen Token hier eintragen. Der Token wird auch benutzt, um die App-Namen für die Gruppen abzufragen.
+- **gotify_http_url**: Optional. HTTP-Adresse des Gotify-Servers für die API-Abfrage der App-Namen. Leer = wird aus gotify_host abgeleitet.
+- **bark_url**: Bark-Server, normalerweise ` + "`https://api.day.app/push`" + `.
+- **reconnect_delay**: Wartezeit in Sekunden vor einem Reconnect (Standard 10).
 
-3.  **Bark Device Key**: 填写你的 Bark 客户端对应的设备 Key。
+#### Prioritäts-Mapping (levels)
 
-4.  **Bark URL**: 通常保持默认的 'https://api.day.app/push' 即可。
+- Priorität ≤ **passive_max** (Standard 0) → ` + "`passive`" + ` – still, nur in der Mitteilungsliste
+- dazwischen → ` + "`active`" + ` – normale Mitteilung
+- Priorität ≥ **timesensitive_from** (Standard 8) → ` + "`timeSensitive`" + ` – durchbricht Fokus-Modi
+- Priorität ≥ **critical_from** (Standard 10) → ` + "`critical`" + ` – Critical Alert, volume = Priorität − critical_from + 1 (max. 10)
 
-5.  **Reconnect Delay**: WebSocket 断线后自动重连的等待时间（秒），默认为 10 秒。
+Beispiel mit Standardwerten: Priorität 10 → critical, Lautstärke 1; 11 → Lautstärke 2; … 19 → Lautstärke 10.
 
-6.  **Encryption Key** (可选): AES 加密密钥。
-    -   支持 16 字节 (AES-128) 或 32 字节 (AES-256)。
-    -   留空则不启用加密。
+#### Empfänger (recipients)
 
-7.  **Encryption IV** (可选): AES CBC 初始化向量，必须为 16 字节。
+Jeder Eintrag ist ein Bark-Gerät mit eigenen Regeln:
 
-**重要提示**: 每次修改配置后，请**禁用**再**重新启用**本插件以使新配置生效。
+- **name**: Nur für das Log.
+- **device_key**: Bark Device Key.
+- **min_priority**: Nachrichten mit tieferer Priorität werden nicht weitergeleitet.
+- **max_level**: Deckel für den Bark-Level (passive, active, timeSensitive, critical). Gilt auch, wenn eine Nachricht per bark::params einen höheren Level verlangt.
+- **apps**: Liste von Gotify-App-Namen (oder App-IDs). Leer = alle Apps.
+- **group**: Feste Bark-Gruppe für diesen Empfänger. Leer = Gruppe aus ` + "`groups`" + ` bzw. App-Name.
+- **params**: Zusätzliche Bark-Parameter, die immer mitgeschickt werden (z. B. sound, icon, isArchive).
+- **levels**: Eigene Schwellen (passive_max, timesensitive_from, critical_from) für diesen Empfänger.
+- **encryption_key / encryption_iv**: AES-CBC-Verschlüsselung (Key 16 oder 32 Bytes, IV 16 Bytes). Leer = unverschlüsselt.
+
+#### Gruppen
+
+- **group_from_app** (Standard true): Der Name der Gotify-App wird als Bark-Gruppe verwendet.
+- **groups**: Zuordnung App-Name → Bark-Gruppe, z. B. ` + "`Uptime-Kuma: Monitoring`" + `.
+
+#### Steuerung pro Nachricht
+
+Alle Bark-Parameter lassen sich pro Nachricht über das Extra ` + "`bark::params`" + ` setzen und haben Vorrang vor dem Mapping:
+
+` + "```" + `
+{"title":"Backup","message":"fehlgeschlagen","priority":5,
+ "extras":{"bark::params":{"level":"timeSensitive","group":"Backup","sound":"alarm"}}}
+` + "```" + `
+
+#### Beispiel-Konfiguration
+
+` + "```yaml" + `
+gotify_host: ws://localhost:80
+gotify_client_token: <client token>
+bark_url: https://api.day.app/push
+reconnect_delay: 10
+levels:
+  passive_max: 0
+  timesensitive_from: 8
+  critical_from: 10
+group_from_app: true
+groups:
+  Uptime-Kuma: Monitoring
+recipients:
+  - name: benj
+    device_key: <device key>
+    min_priority: 0
+  - name: partner
+    device_key: <device key>
+    min_priority: 5
+    max_level: timeSensitive
+    apps: [Alarmanlage, Uptime-Kuma]
+    params:
+      sound: minuet
+` + "```" + `
 `
 }
 
 // listenForMessages connects to the Gotify WebSocket and forwards messages.
 // It runs in a loop to handle reconnections automatically.
 func (c *BarkForwardPlugin) listenForMessages() {
-	defer log.Println("Bark Forwarder: Listener stopped.")
+	defer logf("listener stopped.")
 
 	wsURL := c.config.GotifyHost + "/stream?token=" + c.config.GotifyClientToken
 
@@ -178,12 +167,11 @@ func (c *BarkForwardPlugin) listenForMessages() {
 		default:
 		}
 
-		log.Printf("Bark Forwarder: Connecting to %s", wsURL)
+		logf("connecting to %s", c.config.GotifyHost+"/stream")
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 		if err != nil {
-			log.Printf("Bark Forwarder: WebSocket dial error: %v", err)
-			log.Printf("Bark Forwarder: Reconnecting in %d seconds...", c.config.ReconnectDelay)
-			// Wait before reconnecting, but also listen for the done signal.
+			logf("WebSocket dial error: %v", err)
+			logf("reconnecting in %d seconds...", c.config.ReconnectDelay)
 			select {
 			case <-time.After(time.Duration(c.config.ReconnectDelay) * time.Second):
 				continue
@@ -192,20 +180,18 @@ func (c *BarkForwardPlugin) listenForMessages() {
 			}
 		}
 
-		log.Println("Bark Forwarder: Successfully connected to Gotify WebSocket.")
+		logf("connected to Gotify WebSocket.")
 
-		// We have a connection, now we read messages until an error or disable signal.
 		err = c.readMessages(conn)
-		_ = conn.Close() // Ensure connection is closed on error or clean exit.
+		_ = conn.Close()
 
 		if err == nil {
-			// If readMessages returned nil, it means a clean shutdown was requested.
+			// clean shutdown requested
 			return
 		}
 
-		log.Printf("Bark Forwarder: Disconnected: %v", err)
+		logf("disconnected: %v", err)
 
-		// If we are here, it's due to a read error. Wait before reconnecting.
 		select {
 		case <-time.After(time.Duration(c.config.ReconnectDelay) * time.Second):
 			continue
@@ -215,159 +201,48 @@ func (c *BarkForwardPlugin) listenForMessages() {
 	}
 }
 
-// readMessages is a helper function to read messages from an active WebSocket connection.
+// readMessages reads messages from an active WebSocket connection.
 // It returns an error if the connection is broken, or nil if it's cleanly closed via the 'done' channel.
 func (c *BarkForwardPlugin) readMessages(conn *websocket.Conn) error {
-	// Use a separate goroutine to monitor done channel and close connection
+	// A separate goroutine monitors the done channel and closes the connection.
 	// This avoids the "repeated read on failed websocket connection" panic
-	// that occurs when using ReadDeadline timeouts
+	// that occurs when using ReadDeadline timeouts.
 	closedByDone := make(chan struct{})
-	var closeClosedByDone sync.Once
+	var closeOnce sync.Once
 	safeClose := func() {
-		closeClosedByDone.Do(func() {
-			close(closedByDone)
-		})
+		closeOnce.Do(func() { close(closedByDone) })
 	}
 	go func() {
 		select {
 		case <-c.done:
-			log.Println("Bark Forwarder: Received disable signal, closing WebSocket.")
+			logf("received disable signal, closing WebSocket.")
 			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			_ = conn.Close()
 			safeClose()
 		case <-closedByDone:
-			// Connection closed by read error, exit goroutine
 		}
 	}()
-
-	defer func() {
-		// Signal the monitor goroutine to exit if still running
-		safeClose()
-	}()
+	defer safeClose()
 
 	for {
 		_, messageBytes, err := conn.ReadMessage()
 		if err != nil {
-			// Check if closed by done signal
 			select {
 			case <-c.done:
-				return nil // Clean shutdown
+				return nil // clean shutdown
 			default:
 			}
-			return err // Connection error
+			return err
 		}
 
-		var msg plugin.Message
+		var msg streamMessage
 		if err := json.Unmarshal(messageBytes, &msg); err != nil {
-			log.Printf("Bark Forwarder: Error unmarshalling message: %v", err)
+			logf("error unmarshalling message: %v", err)
 			continue
 		}
 
-		// Forward the message to Bark
-		if err := c.forwardToBark(msg); err != nil {
-			log.Printf("Bark Forwarder: Failed to forward message to Bark: %v", err)
-		}
+		c.forwardToBark(msg)
 	}
-}
-
-// forwardToBark sends the message to the configured Bark server.
-func (c *BarkForwardPlugin) forwardToBark(msg plugin.Message) error {
-	log.Printf("Bark Forwarder: Forwarding message '%s' to Bark.", msg.Title)
-
-	barkReq := map[string]any{
-		"device_key": c.config.BarkDeviceKey,
-		"title":      msg.Title,
-		"body":       msg.Message,
-	}
-
-	// Extract optional params from extras
-	if extras, ok := msg.Extras["bark::params"]; ok {
-		if params, ok := extras.(map[string]any); ok {
-			maps.Copy(barkReq, params)
-		}
-	}
-
-	var requestBody []byte
-	var err error
-
-	// Check if encryption is enabled
-	var targetURL string
-	if c.config.EncryptionKey != "" && c.config.EncryptionIV != "" {
-		// Encrypt the request
-		jsonValue, err := json.Marshal(barkReq)
-		if err != nil {
-			return fmt.Errorf("could not marshal bark request: %w", err)
-		}
-
-		ciphertext, err := c.encryptAESCBC(jsonValue)
-		if err != nil {
-			return fmt.Errorf("encryption failed: %w", err)
-		}
-
-		encryptedReq := map[string]string{
-			"ciphertext": ciphertext,
-		}
-		requestBody, err = json.Marshal(encryptedReq)
-		if err != nil {
-			return fmt.Errorf("could not marshal encrypted request: %w", err)
-		}
-		log.Println("Bark Forwarder: Using encrypted push.")
-		targetURL = encryptedPushURL(c.config.BarkURL, c.config.BarkDeviceKey)
-	} else {
-		// Plain request
-		requestBody, err = json.Marshal(barkReq)
-		if err != nil {
-			return fmt.Errorf("could not marshal bark request: %w", err)
-		}
-		targetURL = plainPushURL(c.config.BarkURL)
-	}
-
-	resp, err := c.httpClient.Post(targetURL, "application/json", bytes.NewBuffer(requestBody))
-	if err != nil {
-		return fmt.Errorf("http post to bark failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("bark server returned non-200 status: %s", resp.Status)
-	}
-
-	log.Println("Bark Forwarder: Successfully forwarded message to Bark.")
-	return nil
-}
-
-// encryptAESCBC encrypts plaintext using AES-CBC with PKCS7 padding.
-func (c *BarkForwardPlugin) encryptAESCBC(plaintext []byte) (string, error) {
-	key := []byte(c.config.EncryptionKey)
-	iv := []byte(c.config.EncryptionIV)
-
-	// Validate key length (16 for AES-128, 32 for AES-256)
-	if len(key) != 16 && len(key) != 32 {
-		return "", errors.New("encryption key must be 16 or 32 bytes")
-	}
-
-	// Validate IV length (must be 16 bytes for AES)
-	if len(iv) != aes.BlockSize {
-		return "", fmt.Errorf("encryption IV must be %d bytes", aes.BlockSize)
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", fmt.Errorf("failed to create cipher: %w", err)
-	}
-
-	// Apply PKCS7 padding
-	padding := aes.BlockSize - len(plaintext)%aes.BlockSize
-	padText := bytes.Repeat([]byte{byte(padding)}, padding)
-	plaintext = append(plaintext, padText...)
-
-	// Encrypt
-	ciphertext := make([]byte, len(plaintext))
-	mode := cipher.NewCBCEncrypter(block, iv)
-	mode.CryptBlocks(ciphertext, plaintext)
-
-	// Return base64 encoded ciphertext
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
 // NewGotifyPluginInstance creates a plugin instance.
@@ -379,26 +254,4 @@ func main() {
 	// This plugin is not meant to be run as a standalone application.
 	// It should be built as a Go plugin and loaded by Gotify.
 	panic("this should be built as go plugin")
-}
-
-func plainPushURL(baseURL string) string {
-	if baseURL == "" {
-		return "https://api.day.app/push"
-	}
-	baseURL = strings.TrimSpace(baseURL)
-	baseURL = strings.TrimRight(baseURL, "/")
-	if strings.HasSuffix(baseURL, "/push") {
-		return baseURL
-	}
-	return baseURL + "/push"
-}
-
-func encryptedPushURL(baseURL, deviceKey string) string {
-	if baseURL == "" {
-		baseURL = "https://api.day.app"
-	}
-	baseURL = strings.TrimSpace(baseURL)
-	baseURL = strings.TrimSuffix(baseURL, "/push")
-	baseURL = strings.TrimRight(baseURL, "/")
-	return fmt.Sprintf("%s/%s", baseURL, deviceKey)
 }
