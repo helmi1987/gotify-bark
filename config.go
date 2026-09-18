@@ -65,6 +65,9 @@ type Config struct {
 // (aps dictionary with alert, sound, category, mutable-content, thread-id).
 const defaultMaxPayload = 3800
 
+// minMaxPayload rejects budgets that cannot hold anything but the fixed fields.
+const minMaxPayload = 512
+
 // defaultTruncateMarker is appended to bodies that had to be shortened.
 const defaultTruncateMarker = " … [gekürzt, vollständig in Gotify]"
 
@@ -205,6 +208,12 @@ func (c *BarkForwardPlugin) ValidateAndSetConfig(config any) error {
 	}
 	if newConfig.MaxPayload <= 0 {
 		newConfig.MaxPayload = defaultMaxPayload
+	}
+	if newConfig.MaxPayload < minMaxPayload {
+		return fmt.Errorf("config: max_payload %d is too small: device_key, title, level, volume and group alone need ~200 bytes, so the body would always be dropped; use at least %d (default %d)", newConfig.MaxPayload, minMaxPayload, defaultMaxPayload)
+	}
+	if newConfig.MaxPayload > apnsPayloadMaximum {
+		return fmt.Errorf("config: max_payload %d exceeds Apple's APNs limit of %d bytes", newConfig.MaxPayload, apnsPayloadMaximum)
 	}
 	if len(newConfig.truncateMarker()) >= newConfig.MaxPayload/2 {
 		return fmt.Errorf("config: truncate_marker is too long for max_payload %d", newConfig.MaxPayload)

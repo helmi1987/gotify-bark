@@ -196,8 +196,22 @@ func TestMaxPayloadConfig(t *testing.T) {
 	assert.Equal(t, "", p.config.truncateMarker())
 
 	cfg = validConfig()
-	cfg.MaxPayload = 40
+	cfg.MaxPayload = 200
 	err := p.ValidateAndSetConfig(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_payload 200 is too small")
+
+	cfg = validConfig()
+	cfg.MaxPayload = 5000
+	err = p.ValidateAndSetConfig(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds Apple's APNs limit")
+
+	cfg = validConfig()
+	cfg.MaxPayload = 600
+	long := strings.Repeat("x", 400)
+	cfg.TruncateMarker = &long
+	err = p.ValidateAndSetConfig(cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "truncate_marker is too long")
 }

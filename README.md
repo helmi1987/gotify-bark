@@ -51,9 +51,11 @@ Bei verschlüsselten Empfängern zählt nicht der Klartext, sondern der base64-C
 Umlaute zählen in UTF-8 doppelt, JSON-Escapes (`"`, `<`, `>`, Zeilenumbrüche) ebenfalls mehr als ein Byte.
 
 ```yaml
-max_payload: 3800                       # Bytes, 0 = Standard
+max_payload: 3800                       # Bytes, 512–4096, 0 = Standard
 truncate_marker: " … [gekürzt, vollständig in Gotify]"   # "" = kein Marker
 ```
+
+Das Budget gilt für das **ganze** Bark-JSON, nicht nur für den Text: `device_key`, Titel, `level`, `volume`, `group` und die JSON-Struktur brauchen zusammen rund 150–250 Bytes, der Marker nochmals 37. Werte unter 512 lehnt das Plugin deshalb ab, denn dann bliebe für den Text nichts übrig. Zum Ausprobieren der Kürzung eignet sich `max_payload: 600`: rund 400 Zeichen Text plus Marker.
 
 Tipp: Mit `params: {url: https://gotify.example.ch}` beim Empfänger öffnet ein Tipp auf die Mitteilung den vollständigen Text in Gotify.
 
@@ -135,7 +137,7 @@ Gotify lädt nur Plugins, die mit exakt derselben Go-Version und denselben Modul
 - Das Gotify-Image in `docker-compose.yaml` ist auf die Version gepinnt, für die das Plugin gebaut wurde. Ein `latest` würde beim nächsten Pull das Plugin und damit Gotify lahmlegen.
 - Gotify prüft beim Laden einen Fingerabdruck jedes gemeinsam genutzten Pakets, und darin stecken auch die Quellpfade. Der Build muss deshalb dasselbe Layout wie das `gotify/build`-Image haben (Go unter `/usr/local/go`, Modul-Cache unter `/go/pkg/mod`). Am einfachsten baut man direkt in diesem Image.
 
-### Im Builder-Container (docker-compose)
+### Im Builder-Container (docker-compose) – empfohlen
 
 Die `docker-compose.yaml` enthält den Dienst `plugin-builder` (`gotify/build:1.26.0-linux-amd64`), der `/opt/gotify/tmp/proj` als Arbeitsverzeichnis und den Plugin-Ordner von Gotify als `/out` einbindet.
 
@@ -144,25 +146,32 @@ docker compose up -d plugin-builder
 docker exec -it gotify-builder bash
 ```
 
-Im Container:
+Im Container einmalig den Quellcode holen, danach genügt `git pull`:
 
 ```sh
-# 1. Quellcode herunterladen
-rm -rf /proj/*
-rm -rf /proj/.*
+rm -rf /proj/* /proj/.[!.]*
 git clone https://github.com/helmi1987/gotify-bark.git .
-
-# 2. Abhängigkeiten laden
-go mod tidy
-
-# 3. Plugin kompilieren
-go build -a -installsuffix cgo -ldflags "-w -s" -buildmode=plugin -o gotify-bark.so
-
-# 4. Kompilierte Datei in den Plugin-Ordner von Gotify kopieren
-cp gotify-bark.so /out/
 ```
 
-Danach Gotify neu starten (`docker compose restart gotify`). Im Gotify-UI unter *Plugins* erscheint «Bark Forwarder» mit der Versionsnummer aus `plugin.go`.
+Bauen mit `build.sh`. Das Script fragt die **laufende Gotify** nach ihrer Version (`GET /version`), lädt zu genau diesem Tag `GO_VERSION` und `go.mod` von GitHub, prüft, ob die Go-Version im Container passt, gleicht `go.mod` ab und legt die `.so` nach `/out`:
+
+```sh
+./build.sh                # Version von http://gotify:80 holen, bauen, nach /out kopieren
+DRY_RUN=1 ./build.sh      # nur prüfen, ob alles zusammenpasst
+./build.sh -h             # alle Umgebungsvariablen (GOTIFY_URL, GOTIFY_VERSION, OUT_DIR, …)
+```
+
+Passt die Go-Version nicht, bricht das Script ab und nennt das richtige `gotify/build`-Image. Meldet es, dass `go.mod`/`go.sum` geändert wurden, hat die laufende Gotify andere Modulversionen als das Repo: Änderung committen, damit der nächste Build ohne Netz auskommt.
+
+Danach Gotify neu starten (`docker compose restart gotify`). Im Gotify-UI unter *Plugins* erscheint «Bark Forwarder» mit der Versionsnummer, im Log `Bark Forwarder v0.3.1 (…) enabled`.
+
+Von Hand ohne Script (entspricht dem, was `build.sh` macht, aber ohne Versionsprüfung):
+
+```sh
+go mod tidy
+go build -a -installsuffix cgo -ldflags "-w -s" -buildmode=plugin -o gotify-bark.so
+cp gotify-bark.so /out/
+```
 
 ### Mit dem Makefile
 
