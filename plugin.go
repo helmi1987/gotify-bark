@@ -64,10 +64,10 @@ type Config struct {
 // DefaultConfig implements plugin.Configurer.
 func (c *BarkForwardPlugin) DefaultConfig() any {
 	return &Config{
-		GotifyHost:        "ws://localhost:80",
+		GotifyHost:        "ws://gotify:80",
 		GotifyClientToken: "",
 		BarkDeviceKey:     "",
-		BarkURL:           "https://api.day.app/push",
+		BarkURL:           "http://bark-server:8080/push",
 		ReconnectDelay:    10,
 	}
 }
