@@ -114,7 +114,19 @@ make GOTIFY_VERSION=v3.1.1 build-linux-amd64
 Ohne Docker auf einem Linux-Host mit gcc: Gotify prüft beim Laden einen Fingerabdruck jedes gemeinsam genutzten Pakets, und darin stecken auch die Quellpfade. Der Build muss deshalb dasselbe Layout wie das `gotify/build`-Image haben, also die passende Go-Version unter `/usr/local/go` und den Modul-Cache unter `/go/pkg/mod`. Das Target prüft die Go-Version und setzt den Cache-Pfad selbst:
 
 ```sh
-make GOTIFY_VERSION=v3.1.1 build-local
+# 1. Quellcode herunterladen
+rm -rf /proj/*
+rm -rf /proj/.*
+git clone https://github.com/helmi1987/gotify-bark.git .
+
+# 2. Abhängigkeiten laden
+go mod tidy
+
+# 3. Plugin kompilieren
+go build -a -installsuffix cgo -ldflags "-w -s" -buildmode=plugin -o gotify-bark.so
+
+# 4. Kompilierte Datei verschieben
+cp gotify-bark.so /out/
 ```
 
 Die `.so` landet in `build/` und wird in das Plugin-Verzeichnis von Gotify kopiert (Docker: `/app/data/plugins`). Danach Gotify neu starten.
