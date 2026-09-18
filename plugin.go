@@ -16,10 +16,10 @@ import (
 // GetGotifyPluginInfo returns gotify plugin info.
 func GetGotifyPluginInfo() plugin.Info {
 	return plugin.Info{
-		ModulePath:  "github.com/p3ddd/gotify-bark",
+		ModulePath:  "github.com/helmi1987/gotify-bark",
 		Version:     "0.3.0",
 		Author:      "Petrichor, extended by Benj Müller",
-		Website:     "https://github.com/p3ddd/gotify-bark",
+		Website:     "https://github.com/helmi1987/gotify-bark",
 		License:     "MIT",
 		Description: "Forwards Gotify messages to one or more Bark devices with priority based levels (critical/timeSensitive), groups and per-recipient rules.",
 		Name:        "Bark Forwarder",
