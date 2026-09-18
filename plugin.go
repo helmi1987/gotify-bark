@@ -126,9 +126,9 @@ Alle Bark-Parameter lassen sich pro Nachricht über das Extra ` + "`bark::params
 #### Beispiel-Konfiguration
 
 ` + "```yaml" + `
-gotify_host: ws://localhost:80
+gotify_host: ws://gotify:80
 gotify_client_token: <client token>
-bark_url: https://api.day.app/push
+bark_url: hhttp://bark-server:8080/push
 reconnect_delay: 10
 levels:
   passive_max: 0
@@ -138,10 +138,10 @@ group_from_app: true
 groups:
   Uptime-Kuma: Monitoring
 recipients:
-  - name: benj
+  - name: User1
     device_key: <device key>
     min_priority: 0
-  - name: partner
+  - name: User2
     device_key: <device key>
     min_priority: 5
     max_level: timeSensitive
