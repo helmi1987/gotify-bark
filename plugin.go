@@ -138,16 +138,21 @@ group_from_app: true
 groups:
   Uptime-Kuma: Monitoring
 recipients:
-  - name: User1
-    device_key: <device key>
-    min_priority: 0
-  - name: User2
-    device_key: <device key>
-    min_priority: 5
-    max_level: timeSensitive
-    apps: [Alarmanlage, Uptime-Kuma]
-    params:
+  - name: max_config_for_device         # Devicename ect.
+    device_key: <bark device key>
+    min_priority: 5                     # darunter nichts weiterleiten
+    max_level: timeSensitive            # bekommt nie einen Critical Alert
+    apps: [Alarmanlage, Uptime-Kuma]    # nur diese Gotify-Apps
+    group: Zuhause                      # feste Gruppe statt App-Name
+    params:                             # immer mitgeschickte Bark-Parameter
       sound: minuet
+    levels:                             # eigene Schwellen
+      timesensitive_from: 6
+    encryption_key: ""                  # 16 oder 32 Bytes, leer = unverschlüsselt
+    encryption_iv: ""                   # 16 Bytes
+  - name: min_config_for_device
+    device_key: <bark device key>
+    min_priority: 0
 ` + "```" + `
 `
 }
