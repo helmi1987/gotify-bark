@@ -13,11 +13,21 @@ import (
 	"github.com/gotify/plugin-api"
 )
 
+// pluginVersion is the single place where the version is defined.
+// It shows up in the Gotify UI (Plugins page and Displayer), in the Gotify log when the
+// plugin is enabled, and as a text marker inside the .so:
+//
+//	strings gotify-bark.so | grep "Bark Forwarder v"
+const pluginVersion = "0.3.1"
+
+// versionBanner is referenced at runtime so the linker keeps it as a greppable string.
+var versionBanner = "Bark Forwarder v" + pluginVersion + " (github.com/helmi1987/gotify-bark)"
+
 // GetGotifyPluginInfo returns gotify plugin info.
 func GetGotifyPluginInfo() plugin.Info {
 	return plugin.Info{
 		ModulePath:  "github.com/helmi1987/gotify-bark",
-		Version:     "0.3.1",
+		Version:     pluginVersion,
 		Author:      "Petrichor, extended by Benj Müller",
 		Website:     "https://github.com/helmi1987/gotify-bark",
 		License:     "MIT",
@@ -54,7 +64,7 @@ func (c *BarkForwardPlugin) Enable() error {
 
 	go c.listenForMessages()
 
-	logf("plugin enabled.")
+	log.Printf("%s enabled (%d recipient(s), max_payload %d).", versionBanner, len(c.config.Recipients), c.config.MaxPayload)
 	return nil
 }
 
@@ -72,6 +82,8 @@ func (c *BarkForwardPlugin) Disable() error {
 func (c *BarkForwardPlugin) GetDisplay(location *url.URL) string {
 	return `
 ### Bark Forwarder – Anleitung
+
+**Version ` + pluginVersion + `** – erscheint beim Aktivieren auch im Gotify-Log (` + "`Bark Forwarder v" + pluginVersion + " enabled`" + `) und in der Datei: ` + "`strings gotify-bark.so | grep \"Bark Forwarder v\"`" + `.
 
 Das Plugin verbindet sich als WebSocket-Client mit dem Gotify-Stream dieses Benutzers und leitet jede Nachricht an einen oder mehrere Bark-Empfänger weiter.
 Die Gotify-Priorität bestimmt dabei den Bark-Level (passive / active / timeSensitive / critical) und bei Critical Alerts die Lautstärke.

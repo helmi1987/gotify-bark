@@ -180,6 +180,16 @@ make GOTIFY_VERSION=v3.1.1 build-local
 
 Die `.so` landet in `build/` und wird nach `/app/data/plugins` im Gotify-Container kopiert (`/opt/gotify/data/plugins` auf dem Host). Danach Gotify neu starten.
 
+## Version prüfen
+
+Eine `.so` lässt sich nicht mit `--version` aufrufen, die Version ist aber an drei Stellen sichtbar:
+
+- Gotify-UI → *Plugins*: Versionsspalte beim «Bark Forwarder», ebenso oben in der Plugin-Anleitung.
+- Gotify-Log beim Aktivieren: `Bark Forwarder v0.3.1 (…) enabled (2 recipient(s), max_payload 3800).`
+- In der Datei selbst, ohne Gotify: `strings gotify-bark.so | grep "Bark Forwarder v"` (im Container: `docker exec gotify sh -c 'strings /app/data/plugins/gotify-bark.so | grep "Bark Forwarder v"'`, falls `strings` fehlt: `grep -a -o "Bark Forwarder v[0-9.]*" gotify-bark.so`).
+
+Die Version steht an genau einer Stelle im Code (`pluginVersion` in `plugin.go`).
+
 ## Tests
 
 ```sh
