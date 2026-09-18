@@ -24,9 +24,9 @@ func TestDefaultConfig(t *testing.T) {
 	p := &BarkForwardPlugin{}
 	cfg := p.DefaultConfig().(*Config)
 
-	assert.Equal(t, "ws://localhost:80", cfg.GotifyHost)
+	assert.Equal(t, "ws://gotify:80", cfg.GotifyHost)
 	assert.Equal(t, "", cfg.GotifyClientToken)
-	assert.Equal(t, "https://api.day.app/push", cfg.BarkURL)
+	assert.Equal(t, "http://bark-server:8080/push", cfg.BarkURL)
 	assert.Equal(t, 10, cfg.ReconnectDelay)
 	assert.True(t, *cfg.GroupFromApp)
 	assert.True(t, cfg.groupFromApp())
@@ -166,13 +166,40 @@ reconnect_delay: 10
 	assert.True(t, p.config.groupFromApp())
 	assert.Equal(t, "http://localhost:80", p.config.GotifyHTTPURL)
 
-	// a fresh default config (empty device key) is rejected with a clear message
+	// the untouched default config is accepted as "not configured" (Gotify validates it on
+	// every start and would otherwise rewrite it with a warning block), but Enable refuses
 	p2 := &BarkForwardPlugin{}
-	def := p2.DefaultConfig().(*Config)
-	def.GotifyClientToken = "token"
-	err := p2.ValidateAndSetConfig(def)
+	def := p2.DefaultConfig()
+	require.NoError(t, p2.ValidateAndSetConfig(def))
+	assert.Nil(t, p2.config)
+	err := p2.Enable()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not configured yet")
+
+	// the same after a YAML round trip, as Gotify stores and reloads it
+	p2b := &BarkForwardPlugin{}
+	out, err := yaml.Marshal(p2b.DefaultConfig())
+	require.NoError(t, err)
+	reloaded := p2b.DefaultConfig()
+	require.NoError(t, yaml.Unmarshal(out, reloaded))
+	require.NoError(t, p2b.ValidateAndSetConfig(reloaded))
+	assert.Nil(t, p2b.config)
+
+	// partially filled (token set, device key still empty) is a real mistake and is rejected
+	p2c := &BarkForwardPlugin{}
+	def2 := p2c.DefaultConfig().(*Config)
+	def2.GotifyClientToken = "token"
+	err = p2c.ValidateAndSetConfig(def2)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `recipient "default": device_key cannot be empty`)
+
+	// device key set but token missing is rejected too
+	p2d := &BarkForwardPlugin{}
+	def3 := p2d.DefaultConfig().(*Config)
+	def3.Recipients[0].DeviceKey = "key"
+	err = p2d.ValidateAndSetConfig(def3)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GotifyClientToken cannot be empty")
 
 	// new-style YAML with recipients replaces the template recipient entirely
 	newYAML := `

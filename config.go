@@ -25,7 +25,7 @@ var levelRank = map[string]int{
 
 // Config defines the plugin config scheme (edited as YAML in the Gotify UI).
 type Config struct {
-	// The WebSocket URL of the Gotify server, e.g. "ws://localhost:80"
+	// The WebSocket URL of the Gotify server, e.g. "ws://gotify:80" (container name from docker-compose.yaml)
 	GotifyHost string `yaml:"gotify_host"`
 	// A client token from Gotify for the plugin to use
 	GotifyClientToken string `yaml:"gotify_client_token"`
@@ -60,6 +60,13 @@ type Config struct {
 	// TruncateMarker is appended to a truncated body. nil (key missing) = default marker, "" = none.
 	TruncateMarker *string `yaml:"truncate_marker,omitempty"`
 }
+
+// Defaults match the service names in docker-compose.yaml: the plugin runs inside the
+// gotify container and reaches Gotify itself and the bark-server over the compose network.
+const (
+	defaultGotifyHost = "ws://gotify:80"
+	defaultBarkURL    = "http://bark-server:8080/push"
+)
 
 // defaultMaxPayload leaves roughly 300 bytes of the 4096-byte APNs limit for Apple's framing
 // (aps dictionary with alert, sound, category, mutable-content, thread-id).
@@ -168,9 +175,9 @@ func (c *Config) groupFromApp() bool {
 // DefaultConfig implements plugin.Configurer.
 func (c *BarkForwardPlugin) DefaultConfig() any {
 	return &Config{
-		GotifyHost:        "ws://localhost:80",
+		GotifyHost:        defaultGotifyHost,
 		GotifyClientToken: "",
-		BarkURL:           "https://api.day.app/push",
+		BarkURL:           defaultBarkURL,
 		ReconnectDelay:    10,
 		MaxPayload:        defaultMaxPayload,
 		Levels: LevelConfig{
@@ -190,9 +197,35 @@ func (c *BarkForwardPlugin) DefaultConfig() any {
 	}
 }
 
+// isUnconfigured reports whether the config is still the untouched default: no client token
+// and no device key anywhere. Gotify validates the stored config on every start; rejecting the
+// pristine default would make Gotify treat it as "outdated" and prepend a warning block to the
+// config on every restart. So the default is accepted as "not configured yet" and Enable()
+// refuses to start until the user fills in token and device key.
+func (c *Config) isUnconfigured() bool {
+	if c.GotifyClientToken != "" || c.BarkDeviceKey != "" {
+		return false
+	}
+	for _, r := range c.Recipients {
+		if r.DeviceKey != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// errNotConfigured is returned by Enable() while the config is still the untouched default.
+var errNotConfigured = errors.New("plugin is not configured yet: set gotify_client_token and at least one recipient device_key in the Configurer, then enable the plugin again")
+
 // ValidateAndSetConfig implements plugin.Configurer.
 func (c *BarkForwardPlugin) ValidateAndSetConfig(config any) error {
 	newConfig := config.(*Config)
+
+	if newConfig.isUnconfigured() {
+		c.config = nil
+		logf("configuration is still the default (no token, no device key); waiting for setup.")
+		return nil
+	}
 
 	if newConfig.GotifyHost == "" {
 		return errors.New("config: GotifyHost cannot be empty")

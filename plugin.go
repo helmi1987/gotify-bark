@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 	"net/url"
@@ -55,7 +54,7 @@ func logf(format string, args ...any) {
 // Enable enables the plugin.
 func (c *BarkForwardPlugin) Enable() error {
 	if c.config == nil {
-		return errors.New("plugin is not configured yet")
+		return errNotConfigured
 	}
 
 	c.done = make(chan struct{})
@@ -92,10 +91,10 @@ Die Gotify-Priorität bestimmt dabei den Bark-Level (passive / active / timeSens
 
 #### Verbindung
 
-- **gotify_host**: WebSocket-Adresse des Gotify-Servers, z. B. ` + "`ws://192.168.1.10:8080`" + ` bzw. ` + "`wss://gotify.example.ch`" + ` bei HTTPS.
+- **gotify_host**: WebSocket-Adresse des Gotify-Servers. Standard ` + "`ws://gotify:80`" + ` (Containername aus docker-compose.yaml, das Plugin läuft im selben Netz); von aussen z. B. ` + "`wss://gotify.example.ch`" + `.
 - **gotify_client_token**: Unter *Clients* einen neuen Client (z. B. ` + "`bark-plugin`" + `) anlegen und dessen Token hier eintragen. Der Token wird auch benutzt, um die App-Namen für die Gruppen abzufragen.
 - **gotify_http_url**: Optional. HTTP-Adresse des Gotify-Servers für die API-Abfrage der App-Namen. Leer = wird aus gotify_host abgeleitet.
-- **bark_url**: Bark-Server, normalerweise ` + "`https://api.day.app/push`" + `.
+- **bark_url**: Bark-Server. Standard ` + "`http://bark-server:8080/push`" + ` (eigener Server aus docker-compose.yaml), alternativ der offizielle ` + "`https://api.day.app/push`" + `.
 - **reconnect_delay**: Wartezeit in Sekunden vor einem Reconnect (Standard 10).
 
 #### Prioritäts-Mapping (levels)

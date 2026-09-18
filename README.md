@@ -63,11 +63,13 @@ Tipp: Mit `params: {url: https://gotify.example.ch}` beim Empfänger öffnet ein
 
 Im Gotify-UI unter *Plugins → Bark Forwarder → Configurer*. Nach jeder Änderung das Plugin deaktivieren und wieder aktivieren.
 
+Die Standardwerte passen zur `docker-compose.yaml` dieses Repos: Das Plugin läuft im Gotify-Container und erreicht Gotify selbst unter `ws://gotify:80` und den eigenen Bark-Server unter `http://bark-server:8080/push` über das Compose-Netz. Ein neuer Benutzer muss also nur `gotify_client_token` und den `device_key` eintragen.
+
 ```yaml
-gotify_host: ws://localhost:80          # wss:// bei HTTPS
+gotify_host: ws://gotify:80             # Containername aus docker-compose.yaml; von aussen wss://…
 gotify_client_token: <client token>     # Gotify → Clients → Create Client
 gotify_http_url: ""                     # optional, sonst aus gotify_host abgeleitet
-bark_url: https://api.day.app/push
+bark_url: http://bark-server:8080/push  # eigener bark-server aus docker-compose.yaml; oder https://api.day.app/push
 reconnect_delay: 10
 
 levels:                                 # globale Schwellen
@@ -101,6 +103,8 @@ recipients:
 ```
 
 Eine alte Konfiguration mit `bark_device_key` funktioniert weiterhin und wird als Empfänger `default` behandelt.
+
+Solange Token und Device Key leer sind (Standard-Config eines neuen Benutzers), gilt das Plugin als «noch nicht konfiguriert»: Gotify akzeptiert die Config, das Aktivieren schlägt mit einem klaren Hinweis fehl. Sobald eines der beiden Felder gefüllt ist, wird die ganze Config streng geprüft und Fehler werden beim Speichern gemeldet.
 
 ### Beispiele
 
