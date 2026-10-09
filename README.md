@@ -12,7 +12,7 @@ Fork von [p3ddd/gotify-bark](https://github.com/p3ddd/gotify-bark), erweitert um
 
 ## Funktionsweise
 
-Das Plugin verbindet sich mit einem Client-Token als WebSocket-Client an `/stream` des Gotify-Servers dieses Benutzers und schickt jede Nachricht per HTTP an den Bark-Server. Für die Gruppen holt es die App-Namen einmal über `GET /application` (gleicher Token) und cached sie.
+Das Plugin verbindet sich mit einem Client-Token als WebSocket-Client an `/stream` des Gotify-Servers dieses Benutzers und schickt jede Nachricht per HTTP an den Bark-Server. Für Gruppen und App-Filter holt es die App-Namen über `GET /application` (gleicher Token) und cached sie. Bei einer unbekannten App-ID wird der Cache neu geladen, höchstens alle 30 Sekunden. HTTP-Timeout für Gotify und Bark: 30 Sekunden.
 
 ### Prioritäts-Mapping
 
@@ -32,6 +32,8 @@ Die Schwellen sind global unter `levels` und pro Empfänger unter `recipients[].
 1. `bark::params` aus den Extras der Nachricht (höchste Priorität)
 2. Level/Volume aus der Priorität, Gruppe aus `groups` bzw. App-Name
 3. `recipients[].params` (statische Defaults wie `sound`, `icon`, `isArchive`)
+
+Die Gruppe wird in dieser Reihenfolge bestimmt: `bark::params.group` → `recipients[].group` → `groups[<App-Name>]` → `groups[<App-ID>]` → App-Name (nur bei `group_from_app: true`).
 
 `max_level` eines Empfängers gilt danach als harter Deckel, auch gegenüber `bark::params`. Der Device Key kann nicht per Nachricht überschrieben werden.
 
@@ -102,7 +104,17 @@ recipients:
     encryption_iv: ""                   # 16 Bytes
 ```
 
-Eine alte Konfiguration mit `bark_device_key` funktioniert weiterhin und wird als Empfänger `default` behandelt.
+Regeln der Validierung:
+
+- `apps`: App-Namen (Gross-/Kleinschreibung egal) oder App-IDs als String. Leer = alle Apps.
+- `name`: muss eindeutig sein; leer → `recipient-<n>`.
+- `max_level`: `passive`, `active`, `timeSensitive` oder `critical`.
+- `encryption_key` und `encryption_iv`: beide gesetzt oder beide leer.
+- `levels`: `passive_max` < `timesensitive_from` ≤ `critical_from`, global und pro Empfänger.
+- `gotify_http_url` leer: wird aus `gotify_host` abgeleitet (`ws://` → `http://`, `wss://` → `https://`).
+- `reconnect_delay` ≤ 0: wird auf 10 gesetzt.
+
+Eine alte Konfiguration mit `bark_device_key` (plus optional `encryption_key`/`encryption_iv` auf oberster Ebene) funktioniert weiterhin und wird als Empfänger `default` behandelt.
 
 Solange Token und Device Key leer sind (Standard-Config eines neuen Benutzers), gilt das Plugin als «noch nicht konfiguriert»: Gotify akzeptiert die Config, das Aktivieren schlägt mit einem klaren Hinweis fehl. Sobald eines der beiden Felder gefüllt ist, wird die ganze Config streng geprüft und Fehler werden beim Speichern gemeldet.
 
@@ -132,6 +144,8 @@ curl "https://gotify.example.ch/message?token=<app token>" \
 ```
 
 Alle Bark-Parameter (`sound`, `icon`, `url`, `call`, `badge`, `isArchive`, `copy`, …) sind in der [Bark-Dokumentation](https://bark.day.app) beschrieben.
+
+Anbindung von Uptime Kuma (Webhook statt Gotify-Typ, Prioritäten über 10, Down laut / Up leise): siehe [Uptime-Kuma-Webhook-Gotify-Bark.md](Uptime-Kuma-Webhook-Gotify-Bark.md).
 
 ## Build
 
@@ -192,7 +206,9 @@ Ohne Docker auf einem Linux-Host mit gcc, Go 1.26.0 unter `/usr/local/go` (das T
 make GOTIFY_VERSION=v3.1.1 build-local
 ```
 
-Die `.so` landet in `build/` und wird nach `/app/data/plugins` im Gotify-Container kopiert (`/opt/gotify/data/plugins` auf dem Host). Danach Gotify neu starten.
+Weitere Targets: `build-linux-arm-7`, `build-linux-arm64`, `build` (alle drei Architekturen).
+
+Die `.so` landet als `build/bark-forwarder-linux-<arch>.so` in `build/` und wird nach `/app/data/plugins` im Gotify-Container kopiert (`/opt/gotify/data/plugins` auf dem Host). Danach Gotify neu starten.
 
 ## Version prüfen
 
@@ -207,5 +223,20 @@ Die Version steht an genau einer Stelle im Code (`pluginVersion` in `plugin.go`)
 ## Tests
 
 ```sh
-go test ./...
+go test ./...   # oder: make test
 ```
+
+## Dateien
+
+| Datei | Inhalt |
+|---|---|
+| `plugin.go` | Plugin-Info, Version, Enable/Disable, WebSocket-Listener, Anleitung im Gotify-UI |
+| `config.go` | Config-Schema, Standardwerte, Validierung |
+| `forward.go` | Prioritäts-Mapping, Filter, Gruppen, Aufbau und Versand des Bark-Requests |
+| `payload.go` | Kürzung auf `max_payload` |
+| `crypto.go` | AES-CBC-Verschlüsselung (PKCS7, base64) |
+| `apps.go` | Cache der Gotify-App-Namen |
+| `build.sh` | Build passend zur laufenden Gotify-Version |
+| `Makefile` | Build mit `gotify/build`-Image oder lokal |
+| `docker-compose.yaml` | Gotify, bark-server, plugin-builder |
+| `Uptime-Kuma-Webhook-Gotify-Bark.md` | Anleitung Uptime Kuma → Gotify → Bark |
